@@ -1,0 +1,28 @@
+{
+    "query": {
+        "bool": {
+            "filter": [
+                {
+                    "range": {
+                        "@timestamp": {
+                            "gte": "{{ date }}"
+                        }
+                    }
+                },
+                {
+                    "query_string": {
+                        "query": "{{ query }}"
+                    }
+                }
+            ]
+        }
+    },
+    "size": 25,
+    "sort": [
+        {
+            "@timestamp": {
+                "order": "desc"
+            }
+        }
+    ]
+}

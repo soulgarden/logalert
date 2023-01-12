@@ -1,0 +1,14 @@
+{
+  "is_debug": true,
+  "storage": {
+    "host": "http://127.0.0.1",
+    "port": 9200,
+    "index_name": "logfowd-*",
+    "api_prefix": "/"
+  },
+  "watch_interval": 60,
+  "query_string": "message:error OR message:panic",
+  "slack": {
+    "webhook_url": "https://hooks.slack.com/services/T0000000000/B0000000000/aaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
