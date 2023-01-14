@@ -4,7 +4,7 @@ use serde_derive::Deserialize;
 pub struct Source {
     pub message: String,
     #[serde(rename(deserialize = "@timestamp"))]
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     pub pod_name: String,
     pub namespace: String,
     pub container_name: String,
@@ -20,6 +20,8 @@ pub struct Struct {
     pub id: String,
     #[serde(rename(deserialize = "_score"))]
     pub score: Option<f64>,
+    #[serde(rename(deserialize = "@timestamp"))]
+    pub timestamp: Option<String>,
     #[serde(rename(deserialize = "_source"))]
     pub source: Source,
 }
@@ -27,14 +29,14 @@ pub struct Struct {
 #[derive(Deserialize)]
 pub struct Total {
     pub value: i64,
-    pub relation: String,
+    pub relation: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct Hits {
     pub total: Total,
     pub max_score: Option<f64>,
-    pub hits: Vec<Struct>,
+    pub hits: Option<Vec<Struct>>,
 }
 
 #[derive(Deserialize)]

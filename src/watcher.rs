@@ -56,7 +56,7 @@ impl Watcher {
 
                     let query = handlebars.render("query", &map).unwrap();
 
-                    let resp = self
+                    let mut req = self
                         .client
                         .post(
                             self.conf.storage.host.clone()
@@ -67,30 +67,41 @@ impl Watcher {
                                 + "/_search",
                         )
                         .body(query.clone())
-                        .header(CONTENT_TYPE, JSON_TYPE)
-                        .send()
-                        .await;
+                        .header(CONTENT_TYPE, JSON_TYPE);
 
-                    match resp {
+                    if self.conf.storage.use_auth {
+                        req = req.basic_auth(
+                            self.conf.storage.username.clone(),
+                            Some(self.conf.storage.password.clone()),
+                        );
+                    }
+
+                    match req.send().await {
                         Ok(resp) => {
-                            let resp_text = resp.text().await.unwrap();
-
-                            let resp = serde_json::from_str::<Root>(resp_text.as_str());
-
-                            match resp {
+                            match serde_json::from_str::<Root>(resp.text().await.unwrap().as_str()) {
                                 Ok(resp) => {
-                                    let hits = resp.hits.hits;
-
-                                    if resp.hits.total.value == 0 {
+                                    if resp.hits.hits.is_none() || resp.hits.total.value == 0 {
                                         start_time = chrono::Utc::now().sub(chrono::Duration::seconds(10));
+
+                                        continue;
                                     }
 
+                                    let hits = resp.hits.hits.unwrap();
+
                                     for hit in hits {
+                                        let mut timestamp = "".to_string();
+
+                                        if hit.source.timestamp.is_some() { // es
+                                            timestamp = hit.source.timestamp.unwrap();
+                                        } else if hit.timestamp.is_some() { // zinc
+                                            timestamp = hit.timestamp.unwrap();
+                                        }
+
                                         self.sender
                                             .send(Event::new(
                                                 hit.id,
                                                 hit.source.message,
-                                                hit.source.timestamp,
+                                                timestamp,
                                                 Meta::new(
                                                     hit.source.pod_name,
                                                     hit.source.namespace,

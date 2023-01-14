@@ -31,6 +31,9 @@ pub struct Storage {
     pub port: u16,
     pub index_name: String,
     pub api_prefix: String,
+    pub use_auth: bool,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Deserialize, Clone)]
