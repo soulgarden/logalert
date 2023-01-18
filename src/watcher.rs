@@ -9,8 +9,8 @@ use reqwest::Client;
 use tokio::sync::Notify;
 use tokio::time;
 
-use crate::events::{Event, Meta};
-use crate::response::Root;
+use crate::entities::event::{Event, Meta};
+use crate::entities::response::Root;
 use crate::sender::Sender;
 use crate::Conf;
 
@@ -88,6 +88,8 @@ impl Watcher {
 
                                     let hits = resp.hits.hits.unwrap();
 
+                                    let mut events: Vec<Event> = Vec::new();
+
                                     for hit in hits {
                                         let mut timestamp = "".to_string();
 
@@ -97,20 +99,20 @@ impl Watcher {
                                             timestamp = hit.timestamp.unwrap();
                                         }
 
-                                        self.sender
-                                            .send(Event::new(
-                                                hit.id,
-                                                hit.source.message,
-                                                timestamp,
-                                                Meta::new(
-                                                    hit.source.pod_name,
-                                                    hit.source.namespace,
-                                                    hit.source.container_name,
-                                                    hit.source.pod_id,
-                                                ),
-                                            ))
-                                            .await;
+                                        events.push(Event::new(
+                                            hit.id,
+                                            hit.source.message,
+                                            timestamp,
+                                            Meta::new(
+                                                hit.source.pod_name,
+                                                hit.source.namespace,
+                                                hit.source.container_name,
+                                                hit.source.pod_id,
+                                            ),
+                                        ))
                                     }
+
+                                    self.sender.send(events).await;
                                 }
                                 Err(err) => {
                                     error!("json decode error: {}", err);

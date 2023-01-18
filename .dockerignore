@@ -15,8 +15,8 @@
 vendor/
 
 .idea
-conf/config.local.json
-conf/config.remote.json
+config.local.json
+config.remote.json
 
 *_gen.go
 *_gen_test.go

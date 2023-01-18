@@ -13,11 +13,9 @@ use crate::signals::listen_signals;
 use crate::watcher::Watcher;
 
 mod conf;
-mod events;
-mod response;
+mod entities;
 mod sender;
 mod signals;
-mod slack;
 mod watcher;
 
 #[tokio::main]
