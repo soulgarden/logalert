@@ -23,5 +23,5 @@ pub fn listen_signals() -> Arc<Notify> {
 
     log::info!("waiting for signal");
 
-    notify.clone()
+    notify
 }

@@ -89,10 +89,10 @@ impl Sender {
 
                         let key = self.regexp.replace(&key, "");
 
-                        if frequency_map.contains_key(key.deref().clone()) {
-                            let m = frequency_map.get(key.deref().clone()).unwrap();
+                        if frequency_map.contains_key(key.deref()) {
+                            let m = frequency_map.get(key.deref()).unwrap();
 
-                            frequency_map.insert(key.deref().clone().to_string(), Message::new(m.text.clone(), m.frequency + 1));
+                            frequency_map.insert(key.deref().to_string(), Message::new(m.text.clone(), m.frequency + 1));
 
                             continue;
                         }

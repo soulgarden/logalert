@@ -25,6 +25,6 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.2
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.3
           cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/logalert:latest
           cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/logalert:latest,mode=max
