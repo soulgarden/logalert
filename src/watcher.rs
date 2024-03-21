@@ -3,16 +3,17 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeDelta;
 use handlebars::Handlebars;
 use log::error;
 use reqwest::Client;
 use tokio::sync::Notify;
 use tokio::time;
 
+use crate::Conf;
 use crate::entities::event::{Event, Meta};
 use crate::entities::response::Root;
 use crate::sender::Sender;
-use crate::Conf;
 
 const CONTENT_TYPE: &str = "Content-Type";
 const JSON_TYPE: &str = "application/json";
@@ -81,7 +82,7 @@ impl Watcher {
                             match serde_json::from_str::<Root>(resp.text().await.unwrap().as_str()) {
                                 Ok(resp) => {
                                     if resp.hits.hits.is_none() || resp.hits.total.value == 0 {
-                                        start_time = chrono::Utc::now().sub(chrono::Duration::seconds(10));
+                                        start_time = chrono::Utc::now().sub(TimeDelta::try_seconds(10).unwrap());
 
                                         continue;
                                     }
