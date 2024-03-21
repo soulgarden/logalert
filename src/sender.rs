@@ -3,6 +3,7 @@ use std::ops::{Deref, Sub};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeDelta;
 use handlebars::{no_escape, Handlebars};
 use log::{debug, error};
 use regex::Regex;
@@ -62,7 +63,7 @@ impl Sender {
                     let mut map = self.sent.write().await;
 
                     if map.len() > EVENTS_SIZE_THRESHOLD {
-                        let cleanup_treshold =  chrono::Utc::now().sub(chrono::Duration::seconds(CLEANUP_INTERVAL)).timestamp();
+                        let cleanup_treshold =  chrono::Utc::now().sub(TimeDelta::try_seconds(CLEANUP_INTERVAL).unwrap()).timestamp();
 
                         map.retain(|_, v| *v > cleanup_treshold);
 
