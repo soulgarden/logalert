@@ -5,8 +5,8 @@ lint:
 	cargo clippy --fix --allow-dirty
 
 build:
-	docker build . -t soulgarden/logalert:0.0.6 --platform linux/amd64
-	docker push soulgarden/logalert:0.0.6
+	docker build . -t soulgarden/logalert:0.0.7 --platform linux/amd64
+	docker push soulgarden/logalert:0.0.7
 
 create_namespace:
 	kubectl create -f ./helm/namespace-logging.json
