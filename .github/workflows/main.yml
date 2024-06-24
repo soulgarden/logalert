@@ -41,7 +41,7 @@ jobs:
       - name: Build
         if: ${{ env.DO_PUSH == 'false' }}
         id: docker_build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
@@ -52,7 +52,7 @@ jobs:
       - name: Build and push
         if: ${{ env.DO_PUSH == 'true' }}
         id: docker_build_push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
