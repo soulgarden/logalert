@@ -1,12 +1,12 @@
 fmt:
 	cargo fmt --all
 
-lint:
-	cargo clippy --fix --allow-dirty
+lint: fmt
+	cargo clippy --fix --allow-dirty --allow-staged
 
 build:
-	docker build . -t soulgarden/logalert:0.0.7 --platform linux/amd64
-	docker push soulgarden/logalert:0.0.7
+	docker build . -t soulgarden/logalert:0.0.8 --platform linux/amd64
+	docker push soulgarden/logalert:0.0.8
 
 create_namespace:
 	kubectl create -f ./helm/namespace-logging.json

@@ -10,10 +10,10 @@ use reqwest::Client;
 use tokio::sync::Notify;
 use tokio::time;
 
-use crate::Conf;
 use crate::entities::event::{Event, Meta};
 use crate::entities::response::Root;
 use crate::sender::Sender;
+use crate::Conf;
 
 const CONTENT_TYPE: &str = "Content-Type";
 const JSON_TYPE: &str = "application/json";
@@ -92,7 +92,7 @@ impl Watcher {
                                     let mut events: Vec<Event> = Vec::new();
 
                                     for hit in hits {
-                                        let mut timestamp = "".to_string();
+                                        let mut timestamp = String::new();
 
                                         if hit.source.timestamp.is_some() { // es
                                             timestamp = hit.source.timestamp.unwrap();
