@@ -4,6 +4,7 @@ use std::io::BufReader;
 use std::{env, fmt};
 
 use serde::Deserialize;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct ConfError {
@@ -66,6 +67,123 @@ impl Conf {
             message: format!("can't parse config.json file, {e}"),
         })?;
 
+        conf.validate()?;
+
         Ok(conf)
+    }
+
+    fn validate(&self) -> Result<(), ConfError> {
+        // Validate polling interval
+        if self.watch_interval == 0 {
+            return Err(ConfError {
+                message: "watch_interval must be greater than 0".to_string(),
+            });
+        }
+
+        if self.watch_interval > 3600 {
+            return Err(ConfError {
+                message: "watch_interval should not exceed 3600 seconds (1 hour)".to_string(),
+            });
+        }
+
+        // Validate query string
+        if self.query_string.trim().is_empty() {
+            return Err(ConfError {
+                message: "query_string cannot be empty".to_string(),
+            });
+        }
+
+        // Validate storage configuration
+        self.storage.validate()?;
+
+        // Validate Slack configuration
+        self.slack.validate()?;
+
+        Ok(())
+    }
+}
+
+impl Storage {
+    fn validate(&self) -> Result<(), ConfError> {
+        // Validate host
+        if self.host.trim().is_empty() {
+            return Err(ConfError {
+                message: "storage host cannot be empty".to_string(),
+            });
+        }
+
+        // Check that host starts with http:// or https://
+        if !self.host.starts_with("http://") && !self.host.starts_with("https://") {
+            return Err(ConfError {
+                message: "storage host must start with http:// or https://".to_string(),
+            });
+        }
+
+        // Validate port
+        if self.port == 0 {
+            return Err(ConfError {
+                message: "storage port must be greater than 0".to_string(),
+            });
+        }
+
+        // Validate index name
+        if self.index_name.trim().is_empty() {
+            return Err(ConfError {
+                message: "storage index_name cannot be empty".to_string(),
+            });
+        }
+
+        // Validate API prefix
+        if self.api_prefix.trim().is_empty() {
+            return Err(ConfError {
+                message: "storage api_prefix cannot be empty".to_string(),
+            });
+        }
+
+        // Validate credentials when authentication is enabled
+        if self.use_auth {
+            if self.username.trim().is_empty() {
+                return Err(ConfError {
+                    message: "storage username cannot be empty when use_auth is true".to_string(),
+                });
+            }
+            if self.password.trim().is_empty() {
+                return Err(ConfError {
+                    message: "storage password cannot be empty when use_auth is true".to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Slack {
+    fn validate(&self) -> Result<(), ConfError> {
+        // Validate webhook URL
+        if self.webhook_url.trim().is_empty() {
+            return Err(ConfError {
+                message: "slack webhook_url cannot be empty".to_string(),
+            });
+        }
+
+        // Check that it's a valid URL
+        match Url::parse(&self.webhook_url) {
+            Ok(url) => {
+                // Check that it's a Slack webhook URL
+                if !url.host_str().unwrap_or("").ends_with("slack.com") {
+                    return Err(ConfError {
+                        message: "webhook_url must be a valid Slack webhook URL".to_string(),
+                    });
+                }
+            }
+            Err(_) => {
+                return Err(ConfError {
+                    message: "webhook_url must be a valid URL".to_string(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }

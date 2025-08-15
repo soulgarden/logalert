@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::ops::{Deref, Sub};
+use std::collections::{hash_map::Entry, HashMap};
+use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,25 +33,37 @@ pub struct Sender {
 }
 
 impl Sender {
-    pub fn new(conf: Conf) -> Self {
+    pub fn new(conf: Conf) -> Result<Self, String> {
         let (tx, _) = broadcast::channel(SEND_QUEUE_SIZE);
 
-        Sender {
+        let regexp = Regex::new(RFC3339_REGEX)
+            .map_err(|e| format!("failed to compile RFC3339 regex: {}", e))?;
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+
+        Ok(Sender {
             conf,
             sender: tx,
-            client: Client::new(),
+            client,
             sent: RwLock::new(HashMap::new()),
-            regexp: Regex::new(RFC3339_REGEX).unwrap(),
-        }
+            regexp,
+        })
     }
 
     pub async fn run(&self, notify: Arc<Notify>) {
         let mut handlebars = Handlebars::new();
         handlebars.register_escape_fn(no_escape);
 
-        handlebars
-            .register_template_string("slack", include_str!("templates/slack.hbs"))
-            .unwrap();
+        if let Err(e) =
+            handlebars.register_template_string("slack", include_str!("templates/slack.hbs"))
+        {
+            error!("failed to register slack template: {}", e);
+            return;
+        }
 
         let mut rx = self.sender.subscribe();
 
@@ -63,44 +75,67 @@ impl Sender {
                     let mut map = self.sent.write().await;
 
                     if map.len() > EVENTS_SIZE_THRESHOLD {
-                        let cleanup_treshold =  chrono::Utc::now().sub(TimeDelta::try_seconds(CLEANUP_INTERVAL).unwrap()).timestamp();
-
-                        map.retain(|_, v| *v > cleanup_treshold);
-
-                        debug!("cleanup done");
+                        match TimeDelta::try_seconds(CLEANUP_INTERVAL) {
+                            Some(delta) => {
+                                let cleanup_threshold = chrono::Utc::now().sub(delta).timestamp();
+                                let before_count = map.len();
+                                map.retain(|_, v| *v > cleanup_threshold);
+                                debug!("cleanup done: removed {} entries", before_count - map.len());
+                            }
+                            None => {
+                                error!("invalid cleanup interval: {}", CLEANUP_INTERVAL);
+                            }
+                        }
                     }
                 }
                 events = rx.recv() => {
-                    if events.is_err() {
-                        error!("error receiving event: {}", events.err().unwrap());
-
-                        break;
-                    }
+                    let events = match events {
+                        Ok(events) => events,
+                        Err(e) => {
+                            error!("error receiving event: {}", e);
+                            break;
+                        }
+                    };
 
                     let mut frequency_map : HashMap<String,Message> = HashMap::new();
 
-                    for e in events.unwrap() {
-                        if self.sent.read().await.contains_key(e.id.clone().as_str()) {
+                    for e in events {
+                        let event_id = &e.id;
+
+                        // Check and add atomically
+                        let already_sent = {
+                            let mut sent_map = self.sent.write().await;
+                            if sent_map.contains_key(event_id) {
+                                true
+                            } else {
+                                sent_map.insert(event_id.clone(), chrono::Utc::now().timestamp());
+                                false
+                            }
+                        };
+
+                        if already_sent {
                             continue;
                         }
-
-                        self.sent.write().await.insert(e.id.clone(), chrono::Utc::now().timestamp());
 
                         let key = format!("{}-{}", e.message, e.meta.namespace);
 
-                        let key = self.regexp.replace(&key, "");
+                        let key = self.regexp.replace(&key, "").into_owned();
 
-                        if frequency_map.contains_key(key.deref()) {
-                            let m = frequency_map.get(key.deref()).unwrap();
-
-                            frequency_map.insert(key.deref().to_string(), Message::new(m.text.clone(), m.frequency + 1));
-
-                            continue;
+                        match frequency_map.entry(key) {
+                            Entry::Occupied(mut entry) => {
+                                entry.get_mut().frequency += 1;
+                            }
+                            Entry::Vacant(entry) => {
+                                let message = match handlebars.render("slack", &new_slack_params_map(e)) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        error!("failed to render slack template: {}", e);
+                                        continue;
+                                    }
+                                };
+                                entry.insert(Message::new(message, 1));
+                            }
                         }
-
-                        let message = handlebars.render("slack", &new_slack_params_map(e)).unwrap();
-
-                        frequency_map.insert(key.to_string(), Message::new(message, 1));
                     }
 
                     for (_, message) in frequency_map {
@@ -109,17 +144,24 @@ impl Sender {
                             Ok(message) => {
                                 match self
                                     .client
-                                    .post(self.conf.slack.webhook_url.clone())
+                                    .post(&self.conf.slack.webhook_url)
                                     .header(CONTENT_TYPE, JSON_TYPE)
                                     .body(message.clone())
                                     .send()
                                     .await {
                                         Ok(resp) => {
-                                            debug!(
-                                                "alert sent: {}, status: {}, resp: {}",
-                                                message, resp.status().to_string(),
-                                                resp.text().await.unwrap().as_str()
-                                            );
+                                            let status = resp.status();
+                                            match resp.text().await {
+                                                Ok(resp_text) => {
+                                                    debug!(
+                                                        "alert sent: {}, status: {}, resp: {}",
+                                                        message, status, resp_text
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    error!("failed to read response body: {}, status: {}", e, status);
+                                                }
+                                            }
                                         },
                                         Err(err) => {
                                             error!("error sending alert: {}", err);

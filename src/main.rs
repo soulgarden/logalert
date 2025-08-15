@@ -26,7 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     builder.target(Target::Stdout);
     builder.filter_level(LevelFilter::Debug);
-    builder.try_init().unwrap();
+    if let Err(e) = builder.try_init() {
+        eprintln!("failed to initialize logger: {}", e);
+        std::process::exit(1);
+    }
 
     let conf = match Conf::new() {
         Ok(conf) => conf,
@@ -46,9 +49,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sender_shutdown_notify = notify.clone();
     let watcher_shutdown_notify = notify.clone();
 
-    let sender = Arc::new(Sender::new(conf.clone()));
+    let sender = match Sender::new(conf.clone()) {
+        Ok(sender) => Arc::new(sender),
+        Err(e) => {
+            warn!("failed to create sender: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    let mut watcher = Watcher::new(conf.clone(), sender.clone());
+    let mut watcher = match Watcher::new(conf.clone(), sender.clone()) {
+        Ok(watcher) => watcher,
+        Err(e) => {
+            warn!("failed to create watcher: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let result = tokio::try_join!(
         tokio::task::spawn(async move { watcher.run(watcher_shutdown_notify).await }),
