@@ -25,20 +25,28 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub fn new(conf: Conf, sender: Arc<Sender>) -> Self {
-        Watcher {
+    pub fn new(conf: Conf, sender: Arc<Sender>) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+
+        Ok(Watcher {
             conf,
             sender,
-            client: Client::new(),
-        }
+            client,
+        })
     }
 
     pub async fn run(&mut self, notify: Arc<Notify>) {
         let mut handlebars = Handlebars::new();
 
-        handlebars
-            .register_template_string("query", include_str!("templates/query.hbs"))
-            .unwrap();
+        if let Err(e) = handlebars
+            .register_template_string("query", include_str!("templates/query.hbs")) {
+            error!("failed to register query template: {}", e);
+            return;
+        }
 
         let mut start_time = chrono::Utc::now();
 
@@ -55,49 +63,77 @@ impl Watcher {
                         ),
                     ]);
 
-                    let query = handlebars.render("query", &map).unwrap();
+                    let query = match handlebars.render("query", &map) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            error!("failed to render query template: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let url = format!(
+                        "{}:{}{}{}/_search",
+                        self.conf.storage.host,
+                        self.conf.storage.port,
+                        self.conf.storage.api_prefix,
+                        self.conf.storage.index_name
+                    );
 
                     let mut req = self
                         .client
-                        .post(
-                            self.conf.storage.host.clone()
-                                + ":"
-                                + self.conf.storage.port.to_string().as_str()
-                                + self.conf.storage.api_prefix.to_string().as_str()
-                                + self.conf.storage.index_name.as_str()
-                                + "/_search",
-                        )
-                        .body(query.clone())
+                        .post(url)
+                        .body(query)
                         .header(CONTENT_TYPE, JSON_TYPE);
 
                     if self.conf.storage.use_auth {
                         req = req.basic_auth(
-                            self.conf.storage.username.clone(),
-                            Some(self.conf.storage.password.clone()),
+                            &self.conf.storage.username,
+                            Some(&self.conf.storage.password),
                         );
                     }
 
                     match req.send().await {
                         Ok(resp) => {
-                            match serde_json::from_str::<Root>(resp.text().await.unwrap().as_str()) {
+                            let resp_text = match resp.text().await {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    error!("failed to read response body: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            match serde_json::from_str::<Root>(&resp_text) {
                                 Ok(resp) => {
                                     if resp.hits.hits.is_none() || resp.hits.total.value == 0 {
-                                        start_time = chrono::Utc::now().sub(TimeDelta::try_seconds(10).unwrap());
-
+                                        match TimeDelta::try_seconds(10) {
+                                            Some(delta) => {
+                                                start_time = chrono::Utc::now().sub(delta);
+                                            }
+                                            None => {
+                                                error!("failed to create 10 second time delta");
+                                                start_time = chrono::Utc::now();
+                                            }
+                                        }
                                         continue;
                                     }
 
-                                    let hits = resp.hits.hits.unwrap();
+                                    let hits = match resp.hits.hits {
+                                        Some(hits) => hits,
+                                        None => {
+                                            error!("hits is None despite value > 0");
+                                            continue;
+                                        }
+                                    };
 
                                     let mut events: Vec<Event> = Vec::new();
 
                                     for hit in hits {
                                         let mut timestamp = String::new();
 
-                                        if hit.source.timestamp.is_some() { // es
-                                            timestamp = hit.source.timestamp.unwrap();
-                                        } else if hit.timestamp.is_some() { // zinc
-                                            timestamp = hit.timestamp.unwrap();
+                                        if let Some(ts) = hit.source.timestamp { // Elasticsearch
+                                            timestamp = ts;
+                                        } else if let Some(ts) = hit.timestamp { // ZincSearch
+                                            timestamp = ts;
                                         }
 
                                         events.push(Event::new(

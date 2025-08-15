@@ -36,12 +36,7 @@ impl Event {
             id,
             message,
             timestamp,
-            meta: Meta {
-                pod_name: meta.pod_name,
-                namespace: meta.namespace,
-                container_name: meta.container_name,
-                pod_id: meta.pod_id,
-            },
+            meta,
         }
     }
 }

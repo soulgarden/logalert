@@ -19,8 +19,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run format check
+        run: cargo fmt -- --check
+
       - name: Run Clippy
-        run: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   build:
     runs-on: ubuntu-latest
@@ -41,22 +60,23 @@ jobs:
       - name: Build
         if: ${{ env.DO_PUSH == 'false' }}
         id: docker_build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: false
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.8
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/logalert:latest
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.9
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build and push
         if: ${{ env.DO_PUSH == 'true' }}
         id: docker_build_push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.8
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/logalert:latest
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/logalert:latest,mode=max
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.9
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
