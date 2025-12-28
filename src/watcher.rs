@@ -171,3 +171,137 @@ impl Watcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_template_rendering() {
+        let mut handlebars = Handlebars::new();
+        handlebars
+            .register_template_string("query", include_str!("templates/query.hbs"))
+            .unwrap();
+
+        let map = HashMap::from([
+            ("query".to_string(), "level:error".to_string()),
+            ("date".to_string(), "2024-01-15T10:30:00Z".to_string()),
+        ]);
+
+        let result = handlebars.render("query", &map).unwrap();
+
+        assert!(result.contains("\"gte\": \"2024-01-15T10:30:00Z\""));
+        assert!(result.contains("\"query\": \"level:error\""));
+        assert!(result.contains("\"size\": 50"));
+    }
+
+    #[test]
+    fn test_query_template_with_complex_query() {
+        let mut handlebars = Handlebars::new();
+        handlebars
+            .register_template_string("query", include_str!("templates/query.hbs"))
+            .unwrap();
+
+        let map = HashMap::from([
+            (
+                "query".to_string(),
+                "level:error AND namespace:production".to_string(),
+            ),
+            ("date".to_string(), "2024-01-15T00:00:00Z".to_string()),
+        ]);
+
+        let result = handlebars.render("query", &map).unwrap();
+
+        assert!(result.contains("level:error AND namespace:production"));
+    }
+
+    #[test]
+    fn test_query_template_json_validity() {
+        let mut handlebars = Handlebars::new();
+        handlebars
+            .register_template_string("query", include_str!("templates/query.hbs"))
+            .unwrap();
+
+        let map = HashMap::from([
+            ("query".to_string(), "level:error".to_string()),
+            ("date".to_string(), "2024-01-15T10:30:00Z".to_string()),
+        ]);
+
+        let result = handlebars.render("query", &map).unwrap();
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result);
+
+        assert!(parsed.is_ok());
+        let json = parsed.unwrap();
+        assert!(json["query"]["bool"]["filter"].is_array());
+        assert_eq!(json["size"], 50);
+    }
+
+    #[test]
+    fn test_url_construction() {
+        let host = "https://elasticsearch.example.com";
+        let port = 9200u16;
+        let api_prefix = "/";
+        let index_name = "logs";
+
+        let url = format!("{}:{}{}{}/_search", host, port, api_prefix, index_name);
+
+        assert_eq!(url, "https://elasticsearch.example.com:9200/logs/_search");
+    }
+
+    #[test]
+    fn test_url_construction_with_api_prefix() {
+        let host = "https://elasticsearch.example.com";
+        let port = 9200u16;
+        let api_prefix = "/api/v1/";
+        let index_name = "logs";
+
+        let url = format!("{}:{}{}{}/_search", host, port, api_prefix, index_name);
+
+        assert_eq!(
+            url,
+            "https://elasticsearch.example.com:9200/api/v1/logs/_search"
+        );
+    }
+
+    #[test]
+    fn test_event_creation_from_hit() {
+        let id = "hit-123".to_string();
+        let message = "Error occurred".to_string();
+        let timestamp = "2024-01-15T10:30:00Z".to_string();
+        let meta = Meta::new(
+            "pod-1".to_string(),
+            "production".to_string(),
+            "app".to_string(),
+            "uuid-1".to_string(),
+        );
+
+        let event = Event::new(id.clone(), message.clone(), timestamp.clone(), meta);
+
+        assert_eq!(event.id, id);
+        assert_eq!(event.message, message);
+        assert_eq!(event.timestamp, timestamp);
+        assert_eq!(event.meta.pod_name, "pod-1");
+        assert_eq!(event.meta.namespace, "production");
+    }
+
+    #[test]
+    fn test_rfc3339_date_format() {
+        let now = chrono::Utc::now();
+        let formatted = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        assert!(formatted.ends_with('Z'));
+        assert!(formatted.contains('T'));
+        assert_eq!(formatted.len(), 20);
+    }
+
+    #[test]
+    fn test_time_delta_10_seconds() {
+        let delta = TimeDelta::try_seconds(10);
+        assert!(delta.is_some());
+
+        let now = chrono::Utc::now();
+        let past = now.sub(delta.unwrap());
+
+        assert!(past < now);
+    }
+}

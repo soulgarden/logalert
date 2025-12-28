@@ -1,8 +1,14 @@
 fmt:
 	cargo fmt --all
 
-lint: fmt
-	cargo clippy --fix --allow-dirty --allow-staged
+lint:
+	cargo clippy --all-targets --all-features -- -D warnings
+
+lint_fix:
+	cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
+
+test:
+	cargo test
 
 build:
 	docker build . -t soulgarden/logalert:0.0.10 --platform linux/amd64

@@ -204,3 +204,130 @@ fn new_slack_params_map(e: Event) -> HashMap<String, String> {
         ("pod_id".to_string(), e.meta.pod_id),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::event::Meta;
+
+    #[test]
+    fn test_rfc3339_regex_matches_standard_format() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        assert!(regexp.is_match("2024-01-15T10:30:00Z"));
+        assert!(regexp.is_match("2024-12-31T23:59:59Z"));
+        assert!(regexp.is_match("2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_rfc3339_regex_matches_with_nanoseconds() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        assert!(regexp.is_match("2024-01-15T10:30:00.123Z"));
+        assert!(regexp.is_match("2024-01-15T10:30:00.123456Z"));
+        assert!(regexp.is_match("2024-01-15T10:30:00.123456789Z"));
+    }
+
+    #[test]
+    fn test_rfc3339_regex_replacement() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        let input = "Error at 2024-01-15T10:30:00Z in production";
+        let result = regexp.replace(input, "").into_owned();
+        assert_eq!(result, "Error at  in production");
+
+        let input_with_ns = "Log: 2024-01-15T10:30:00.123456789Z - failed";
+        let result = regexp.replace(input_with_ns, "").into_owned();
+        assert_eq!(result, "Log:  - failed");
+    }
+
+    #[test]
+    fn test_rfc3339_regex_no_match() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        assert!(!regexp.is_match("2024-01-15"));
+        assert!(!regexp.is_match("10:30:00"));
+        assert!(!regexp.is_match("not a timestamp"));
+        assert!(!regexp.is_match("2024/01/15T10:30:00Z"));
+    }
+
+    #[test]
+    fn test_new_slack_params_map() {
+        let event = Event::new(
+            "event-123".to_string(),
+            "Error occurred".to_string(),
+            "2024-01-15T10:30:00Z".to_string(),
+            Meta::new(
+                "my-pod".to_string(),
+                "production".to_string(),
+                "app".to_string(),
+                "pod-uuid".to_string(),
+            ),
+        );
+
+        let params = new_slack_params_map(event);
+
+        assert_eq!(params.get("id").unwrap(), "event-123");
+        assert_eq!(params.get("message").unwrap(), "Error occurred");
+        assert_eq!(params.get("timestamp").unwrap(), "2024-01-15T10:30:00Z");
+        assert_eq!(params.get("pod_name").unwrap(), "my-pod");
+        assert_eq!(params.get("namespace").unwrap(), "production");
+        assert_eq!(params.get("container_name").unwrap(), "app");
+        assert_eq!(params.get("pod_id").unwrap(), "pod-uuid");
+    }
+
+    #[test]
+    fn test_message_aggregation_key_generation() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        let message1 = "Error at 2024-01-15T10:30:00Z";
+        let namespace1 = "prod";
+        let key1 = format!("{}-{}", message1, namespace1);
+        let normalized_key1 = regexp.replace(&key1, "").into_owned();
+
+        let message2 = "Error at 2024-01-15T11:45:30Z";
+        let namespace2 = "prod";
+        let key2 = format!("{}-{}", message2, namespace2);
+        let normalized_key2 = regexp.replace(&key2, "").into_owned();
+
+        assert_eq!(normalized_key1, normalized_key2);
+        assert_eq!(normalized_key1, "Error at -prod");
+    }
+
+    #[test]
+    fn test_message_aggregation_different_namespaces() {
+        let regexp = Regex::new(RFC3339_REGEX).unwrap();
+
+        let key1 = regexp.replace("Error-production", "").into_owned();
+        let key2 = regexp.replace("Error-staging", "").into_owned();
+
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_sender_new_creates_valid_sender() {
+        let conf = create_test_config();
+        let result = Sender::new(conf);
+        assert!(result.is_ok());
+    }
+
+    fn create_test_config() -> crate::conf::Conf {
+        crate::conf::Conf {
+            is_debug: false,
+            storage: crate::conf::Storage {
+                host: "https://es.example.com".to_string(),
+                port: 9200,
+                index_name: "logs".to_string(),
+                api_prefix: "/".to_string(),
+                use_auth: false,
+                username: String::new(),
+                password: String::new(),
+            },
+            watch_interval: 60,
+            query_string: "level:error".to_string(),
+            slack: crate::conf::Slack {
+                webhook_url: "https://hooks.slack.com/services/xxx/yyy/zzz".to_string(),
+            },
+        }
+    }
+}

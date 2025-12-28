@@ -17,7 +17,7 @@ impl fmt::Display for ConfError {
     }
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Conf {
     pub is_debug: bool,
     pub storage: Storage,
@@ -26,7 +26,7 @@ pub struct Conf {
     pub slack: Slack,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Storage {
     pub host: String,
     pub port: u16,
@@ -37,7 +37,7 @@ pub struct Storage {
     pub password: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Slack {
     pub webhook_url: String,
 }
@@ -185,5 +185,276 @@ impl Slack {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn create_valid_config() -> Conf {
+        Conf {
+            is_debug: false,
+            storage: Storage {
+                host: "https://elasticsearch.example.com".to_string(),
+                port: 9200,
+                index_name: "logs".to_string(),
+                api_prefix: "/".to_string(),
+                use_auth: false,
+                username: String::new(),
+                password: String::new(),
+            },
+            watch_interval: 60,
+            query_string: "level:error".to_string(),
+            slack: Slack {
+                webhook_url: "https://hooks.slack.com/services/xxx/yyy/zzz".to_string(),
+            },
+        }
+    }
+
+    fn write_config_file(config: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(config.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn test_valid_config() {
+        let config = create_valid_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_config_from_file() {
+        let config_json = r#"{
+            "is_debug": false,
+            "storage": {
+                "host": "https://es.example.com",
+                "port": 9200,
+                "index_name": "logs",
+                "api_prefix": "/",
+                "use_auth": false,
+                "username": "",
+                "password": ""
+            },
+            "watch_interval": 60,
+            "query_string": "level:error",
+            "slack": {
+                "webhook_url": "https://hooks.slack.com/services/T00/B00/xxx"
+            }
+        }"#;
+
+        let file = write_config_file(config_json);
+        env::set_var("CFG_PATH", file.path());
+
+        let result = Conf::new();
+        assert!(result.is_ok());
+
+        env::remove_var("CFG_PATH");
+    }
+
+    #[test]
+    fn test_invalid_watch_interval_zero() {
+        let mut config = create_valid_config();
+        config.watch_interval = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("watch_interval must be greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_watch_interval_too_large() {
+        let mut config = create_valid_config();
+        config.watch_interval = 3601;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("should not exceed 3600 seconds"));
+    }
+
+    #[test]
+    fn test_valid_watch_interval_boundary() {
+        let mut config = create_valid_config();
+        config.watch_interval = 1;
+        assert!(config.validate().is_ok());
+
+        config.watch_interval = 3600;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_empty_query_string() {
+        let mut config = create_valid_config();
+        config.query_string = "   ".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("query_string cannot be empty"));
+    }
+
+    #[test]
+    fn test_invalid_storage_host_empty() {
+        let mut config = create_valid_config();
+        config.storage.host = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("storage host cannot be empty"));
+    }
+
+    #[test]
+    fn test_invalid_storage_host_no_protocol() {
+        let mut config = create_valid_config();
+        config.storage.host = "elasticsearch.example.com".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("must start with http:// or https://"));
+    }
+
+    #[test]
+    fn test_invalid_storage_port_zero() {
+        let mut config = create_valid_config();
+        config.storage.port = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("storage port must be greater than 0"));
+    }
+
+    #[test]
+    fn test_invalid_storage_index_name_empty() {
+        let mut config = create_valid_config();
+        config.storage.index_name = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("storage index_name cannot be empty"));
+    }
+
+    #[test]
+    fn test_invalid_storage_api_prefix_empty() {
+        let mut config = create_valid_config();
+        config.storage.api_prefix = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("storage api_prefix cannot be empty"));
+    }
+
+    #[test]
+    fn test_auth_enabled_missing_username() {
+        let mut config = create_valid_config();
+        config.storage.use_auth = true;
+        config.storage.username = "".to_string();
+        config.storage.password = "secret".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("username cannot be empty when use_auth is true"));
+    }
+
+    #[test]
+    fn test_auth_enabled_missing_password() {
+        let mut config = create_valid_config();
+        config.storage.use_auth = true;
+        config.storage.username = "admin".to_string();
+        config.storage.password = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("password cannot be empty when use_auth is true"));
+    }
+
+    #[test]
+    fn test_auth_enabled_valid_credentials() {
+        let mut config = create_valid_config();
+        config.storage.use_auth = true;
+        config.storage.username = "admin".to_string();
+        config.storage.password = "secret".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_slack_webhook_empty() {
+        let mut config = create_valid_config();
+        config.slack.webhook_url = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("slack webhook_url cannot be empty"));
+    }
+
+    #[test]
+    fn test_invalid_slack_webhook_not_url() {
+        let mut config = create_valid_config();
+        config.slack.webhook_url = "not-a-url".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("must be a valid URL"));
+    }
+
+    #[test]
+    fn test_invalid_slack_webhook_wrong_domain() {
+        let mut config = create_valid_config();
+        config.slack.webhook_url = "https://example.com/webhook".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("must be a valid Slack webhook URL"));
+    }
+
+    #[test]
+    fn test_missing_config_file() {
+        env::set_var("CFG_PATH", "/nonexistent/path/config.json");
+        let result = Conf::new();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("can't open config.json file"));
+        env::remove_var("CFG_PATH");
+    }
+
+    #[test]
+    fn test_invalid_json_config() {
+        let file = write_config_file("{ invalid json }");
+        env::set_var("CFG_PATH", file.path());
+
+        let result = Conf::new();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("can't parse config.json file"));
+
+        env::remove_var("CFG_PATH");
     }
 }
