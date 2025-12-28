@@ -34,9 +34,6 @@ pub struct Hits {
 }
 
 #[derive(Deserialize)]
-pub struct Shards {}
-
-#[derive(Deserialize)]
 pub struct Root {
     pub hits: Hits,
 }

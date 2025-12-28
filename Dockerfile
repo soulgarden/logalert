@@ -1,4 +1,4 @@
-FROM rust:1.89-alpine AS builder
+FROM rust:1.91-alpine AS builder
 
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 
@@ -12,7 +12,7 @@ WORKDIR /tmp/rust/src/github.com/soulgarden/logalert
 
 RUN cargo build --target=x86_64-unknown-linux-musl --release
 
-FROM alpine:3.22
+FROM alpine:3.23
 
 RUN apk add --no-cache libgcc
 

@@ -65,7 +65,7 @@ jobs:
           context: .
           file: Dockerfile
           push: false
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.9
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.10
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -77,6 +77,6 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.9
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/logalert:0.0.10
           cache-from: type=gha
           cache-to: type=gha,mode=max
