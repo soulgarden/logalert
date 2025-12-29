@@ -13,7 +13,7 @@ env:
   DO_PUSH: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
-  lint:
+  check:
     runs-on: ubuntu-latest
 
     steps:

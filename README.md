@@ -138,7 +138,7 @@ make helm_upgrade
 make build
 
 # Run container
-docker run -v $(pwd)/config.json:/app/config.json soulgarden/logalert:0.0.9
+docker run -v $(pwd)/config.json:/app/config.json soulgarden/logalert:0.0.10
 ```
 
 ### From Source
@@ -160,8 +160,11 @@ make fmt
 # Run linting
 make lint
 
+# Run linting with auto-fix
+make lint_fix
+
 # Run tests
-cargo test
+make test
 ```
 
 ## Performance Characteristics
