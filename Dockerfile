@@ -1,12 +1,11 @@
-FROM rust:1.91-alpine AS builder
+FROM rust:1.93.1-alpine AS builder
 
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev gcc make && \
+    rustup target add x86_64-unknown-linux-musl
 
 COPY . /tmp/rust/src/github.com/soulgarden/logalert
-
-VOLUME ./target /tmp/rust/src/github.com/soulgarden/logalert
 
 WORKDIR /tmp/rust/src/github.com/soulgarden/logalert
 
