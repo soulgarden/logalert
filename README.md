@@ -134,11 +134,14 @@ make helm_upgrade
 ### Docker
 
 ```bash
-# Build and push image
+# Build image locally
 make build
 
+# Build and push image
+make push
+
 # Run container
-docker run -v $(pwd)/config.json:/app/config.json soulgarden/logalert:0.0.10
+docker run --rm -v "$(pwd)/config.json:/config.json:ro" "soulgarden/logalert:$(cat VERSION)"
 ```
 
 ### From Source
