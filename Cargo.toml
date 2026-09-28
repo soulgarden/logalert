@@ -11,7 +11,6 @@ publish = false
 chrono = { version = "0.4.45", features = ["serde"] }
 handlebars = "6.4.4"
 json_env_logger2 = "0.2.1"
-libc = "0.2.189"
 log = "0.4.34"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }

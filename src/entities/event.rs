@@ -1,5 +1,6 @@
 #[derive(Clone, Debug)]
 pub struct Event {
+    pub index: String,
     pub id: String,
     pub message: String,
     pub timestamp: String,
@@ -33,6 +34,7 @@ impl Meta {
 impl Event {
     pub fn new(id: String, message: String, timestamp: String, meta: Meta) -> Self {
         Self {
+            index: String::new(),
             id,
             message,
             timestamp,

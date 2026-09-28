@@ -1,15 +1,15 @@
 #![deny(warnings)]
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::time::Duration;
 
-use json_env_logger2::builder;
-use json_env_logger2::env_logger::Target;
-use log::{warn, LevelFilter};
+use json_env_logger2::{builder, env_logger::Target};
+use log::LevelFilter;
+use tokio::sync::watch;
 
 use crate::conf::Conf;
 use crate::sender::Sender;
-use crate::signals::listen_signals;
+use crate::signals::{listen_signals, wait_for_shutdown};
 use crate::watcher::Watcher;
 
 mod conf;
@@ -18,62 +18,46 @@ mod sender;
 mod signals;
 mod watcher;
 
+#[cfg(test)]
+mod test_support;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     json_env_logger2::panic_hook();
-
-    let mut builder = builder();
-
-    builder.target(Target::Stdout);
-    builder.filter_level(LevelFilter::Debug);
-    if let Err(e) = builder.try_init() {
-        eprintln!("failed to initialize logger: {}", e);
-        std::process::exit(1);
-    }
-
-    let conf = match Conf::new() {
-        Ok(conf) => conf,
-        Err(err) => {
-            warn!("failed to load configuration, {}", err);
-
-            std::process::exit(1);
-        }
-    };
-
+    builder()
+        .target(Target::Stdout)
+        .filter_level(LevelFilter::Debug)
+        .try_init()?;
+    let conf = Conf::new().map_err(|error| error.to_string())?;
     if !conf.is_debug {
         log::set_max_level(LevelFilter::Info);
     }
-
-    let notify = listen_signals();
-
-    let sender_shutdown_notify = notify.clone();
-    let watcher_shutdown_notify = notify.clone();
-
-    let sender = match Sender::new(conf.clone()) {
-        Ok(sender) => Arc::new(sender),
-        Err(e) => {
-            warn!("failed to create sender: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let mut watcher = match Watcher::new(conf.clone(), sender.clone()) {
-        Ok(watcher) => watcher,
-        Err(e) => {
-            warn!("failed to create watcher: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let result = tokio::try_join!(
-        tokio::task::spawn(async move { watcher.run(watcher_shutdown_notify).await }),
-        tokio::task::spawn(async move { sender.run(sender_shutdown_notify).await }),
-    );
-
-    match result {
-        Ok(_) => log::info!("shutdown completed"),
-        Err(e) => log::error!("thread join error {}", e),
-    }
-
+    let mut watcher = Watcher::new(conf.clone())?;
+    let mut sender = Sender::new(conf)?;
+    run_until_shutdown(
+        &mut watcher,
+        &mut sender,
+        listen_signals()?,
+        Duration::from_secs(15),
+    )
+    .await?;
+    log::info!("shutdown completed");
     Ok(())
+}
+
+async fn run_until_shutdown(
+    watcher: &mut Watcher,
+    sender: &mut Sender,
+    mut shutdown: watch::Receiver<bool>,
+    grace: Duration,
+) -> Result<(), String> {
+    let processing = watcher.run(sender, shutdown.clone());
+    tokio::pin!(processing);
+    tokio::select! {
+        _ = &mut processing => Ok(()),
+        _ = wait_for_shutdown(&mut shutdown) => {
+            tokio::time::timeout(grace, &mut processing).await
+                .map_err(|_| "shutdown deadline exceeded; an in-flight request may be incomplete".to_string())
+        }
+    }
 }
