@@ -1,26 +1,26 @@
-FROM rust:1.93.1-alpine AS builder
+# syntax=docker/dockerfile:1
 
-ENV RUSTFLAGS="-C target-feature=-crt-static"
+FROM rust:1.98.1-alpine3.24 AS builder
 
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev gcc make && \
-    rustup target add x86_64-unknown-linux-musl
+RUN apk add --no-cache cmake make musl-dev
 
-COPY . /tmp/rust/src/github.com/soulgarden/logalert
+WORKDIR /app
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src/ ./src/
 
-WORKDIR /tmp/rust/src/github.com/soulgarden/logalert
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release --locked && \
+    install -Dm755 target/release/logalert /out/logalert
 
-RUN cargo build --target=x86_64-unknown-linux-musl --release
+FROM alpine:3.24.2
 
-FROM alpine:3.23
+RUN apk add --no-cache ca-certificates && \
+    adduser -S -u 10001 -G www-data www-data
 
-RUN apk add --no-cache libgcc
+COPY --from=builder /out/logalert /usr/local/bin/logalert
 
-RUN adduser -S www-data -G www-data
-
-COPY --from=builder --chown=www-data /tmp/rust/src/github.com/soulgarden/logalert/target/x86_64-unknown-linux-musl/release/logalert /bin/logalert
-
-RUN chmod +x /bin/logalert
-
-USER www-data
-
-CMD ["/bin/logalert"]
+ENV CFG_PATH=/config.json
+USER 10001:82
+CMD ["/usr/local/bin/logalert"]
