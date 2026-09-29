@@ -1,27 +1,25 @@
-use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::watch;
 
-use libc::{SIGINT, SIGTERM};
-use tokio::signal::unix::SignalKind;
-use tokio::sync::Notify;
+pub fn listen_signals() -> std::io::Result<watch::Receiver<bool>> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let (sender, receiver) = watch::channel(false);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+        sender.send_replace(true);
+        log::info!("shutdown signal received");
+    });
+    Ok(receiver)
+}
 
-pub fn listen_signals() -> Arc<Notify> {
-    let notify = Arc::new(Notify::new());
+pub fn is_shutdown(receiver: &watch::Receiver<bool>) -> bool {
+    *receiver.borrow() || receiver.has_changed().is_err()
+}
 
-    for &signum in [SIGTERM, SIGINT].iter() {
-        let mut sig = tokio::signal::unix::signal(SignalKind::from_raw(signum)).unwrap();
-
-        let notify = notify.clone();
-
-        tokio::spawn(async move {
-            sig.recv().await;
-
-            notify.notify_waiters();
-
-            log::info!("shutdown signal received");
-        });
-    }
-
-    log::info!("waiting for signal");
-
-    notify
+pub async fn wait_for_shutdown(receiver: &mut watch::Receiver<bool>) {
+    let _ = receiver.wait_for(|stopping| *stopping).await;
 }

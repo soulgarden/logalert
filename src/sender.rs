@@ -1,195 +1,182 @@
-use std::collections::{hash_map::Entry, HashMap};
-use std::ops::Sub;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-use chrono::TimeDelta;
 use handlebars::{no_escape, Handlebars};
-use log::{debug, error};
 use regex::Regex;
-use reqwest::Client;
-use tokio::sync::{broadcast, Notify, RwLock};
-use tokio::time;
+use reqwest::{Client, StatusCode};
+use tokio::sync::watch;
 
 use crate::entities::event::Event;
 use crate::entities::message::Message;
 use crate::entities::slack::Slack;
+use crate::signals::{is_shutdown, wait_for_shutdown};
 use crate::Conf;
 
-const SEND_QUEUE_SIZE: usize = 1024;
-const CLEANUP_INTERVAL: i64 = 3600;
-const EVENTS_SIZE_THRESHOLD: usize = 100000;
-
-const CONTENT_TYPE: &str = "Content-Type";
-const JSON_TYPE: &str = "application/json";
+const CACHE_TTL: Duration = Duration::from_secs(3600);
+const MAX_ATTEMPTS: u32 = 3;
 const RFC3339_REGEX: &str = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z";
+type EventKey = (String, String);
+
+#[cfg(test)]
+mod regression_tests;
+
+struct Group {
+    ids: Vec<EventKey>,
+    message: Message,
+}
 
 pub struct Sender {
-    conf: Conf,
-    sender: broadcast::Sender<Vec<Event>>,
+    webhook_url: String,
     client: Client,
-    sent: RwLock<HashMap<String, i64>>,
+    sent: HashMap<EventKey, Instant>,
     regexp: Regex,
+    templates: Handlebars<'static>,
+    retry_delay: Duration,
+    retry_not_before: Option<tokio::time::Instant>,
 }
 
 impl Sender {
     pub fn new(conf: Conf) -> Result<Self, String> {
-        let (tx, _) = broadcast::channel(SEND_QUEUE_SIZE);
-
-        let regexp = Regex::new(RFC3339_REGEX)
-            .map_err(|e| format!("failed to compile RFC3339 regex: {}", e))?;
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-
-        Ok(Sender {
-            conf,
-            sender: tx,
-            client,
-            sent: RwLock::new(HashMap::new()),
-            regexp,
+        let mut templates = Handlebars::new();
+        templates.register_escape_fn(no_escape);
+        templates
+            .register_template_string("slack", include_str!("templates/slack.hbs"))
+            .map_err(|e| format!("invalid Slack template: {e}"))?;
+        Ok(Self {
+            webhook_url: conf.slack.webhook_url,
+            client: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("failed to create Slack client: {e}"))?,
+            sent: HashMap::new(),
+            regexp: Regex::new(RFC3339_REGEX).map_err(|e| e.to_string())?,
+            templates,
+            retry_delay: Duration::from_secs(1),
+            retry_not_before: None,
         })
     }
 
-    pub async fn run(&self, notify: Arc<Notify>) {
-        let mut handlebars = Handlebars::new();
-        handlebars.register_escape_fn(no_escape);
-
-        if let Err(e) =
-            handlebars.register_template_string("slack", include_str!("templates/slack.hbs"))
-        {
-            error!("failed to register slack template: {}", e);
-            return;
-        }
-
-        let mut rx = self.sender.subscribe();
-
-        let mut ticker = time::interval(Duration::from_secs(CLEANUP_INTERVAL as u64));
-
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    let mut map = self.sent.write().await;
-
-                    if map.len() > EVENTS_SIZE_THRESHOLD {
-                        match TimeDelta::try_seconds(CLEANUP_INTERVAL) {
-                            Some(delta) => {
-                                let cleanup_threshold = chrono::Utc::now().sub(delta).timestamp();
-                                let before_count = map.len();
-                                map.retain(|_, v| *v > cleanup_threshold);
-                                debug!("cleanup done: removed {} entries", before_count - map.len());
-                            }
-                            None => {
-                                error!("invalid cleanup interval: {}", CLEANUP_INTERVAL);
-                            }
-                        }
-                    }
-                }
-                events = rx.recv() => {
-                    let events = match events {
-                        Ok(events) => events,
-                        Err(e) => {
-                            error!("error receiving event: {}", e);
-                            break;
-                        }
-                    };
-
-                    let mut frequency_map : HashMap<String,Message> = HashMap::new();
-
-                    for e in events {
-                        let event_id = &e.id;
-
-                        // Check and add atomically
-                        let already_sent = {
-                            let mut sent_map = self.sent.write().await;
-                            if sent_map.contains_key(event_id) {
-                                true
-                            } else {
-                                sent_map.insert(event_id.clone(), chrono::Utc::now().timestamp());
-                                false
-                            }
-                        };
-
-                        if already_sent {
-                            continue;
-                        }
-
-                        let key = format!("{}-{}", e.message, e.meta.namespace);
-
-                        let key = self.regexp.replace(&key, "").into_owned();
-
-                        match frequency_map.entry(key) {
-                            Entry::Occupied(mut entry) => {
-                                entry.get_mut().frequency += 1;
-                            }
-                            Entry::Vacant(entry) => {
-                                let message = match handlebars.render("slack", &new_slack_params_map(e)) {
-                                    Ok(msg) => msg,
-                                    Err(e) => {
-                                        error!("failed to render slack template: {}", e);
-                                        continue;
-                                    }
-                                };
-                                entry.insert(Message::new(message, 1));
-                            }
-                        }
-                    }
-
-                    for (_, message) in frequency_map {
-                        match serde_json::to_string(&Slack::new(message.text,message.frequency))
-                        {
-                            Ok(message) => {
-                                match self
-                                    .client
-                                    .post(&self.conf.slack.webhook_url)
-                                    .header(CONTENT_TYPE, JSON_TYPE)
-                                    .body(message.clone())
-                                    .send()
-                                    .await {
-                                        Ok(resp) => {
-                                            let status = resp.status();
-                                            match resp.text().await {
-                                                Ok(resp_text) => {
-                                                    debug!(
-                                                        "alert sent: {}, status: {}, resp: {}",
-                                                        message, status, resp_text
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    error!("failed to read response body: {}, status: {}", e, status);
-                                                }
-                                            }
-                                        },
-                                        Err(err) => {
-                                            error!("error sending alert: {}", err);
-                                        }
-                                }
-                            }
-                            Err(e) => {
-                                error!("error serializing event: {}", e);
-                            }
-                        }
-                    }
-                }
-                _ = notify.notified() => {
-                    log::info!("sender received shutdown signal");
-
-                    break
-                }
+    /// Returns false when shutdown interrupts delivery. Only acknowledged IDs
+    /// enter the cache, so callers can safely replay an unfinished search window.
+    pub async fn send(
+        &mut self,
+        events: Vec<Event>,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool, String> {
+        self.sent.retain(|_, time| time.elapsed() < CACHE_TTL);
+        let groups = self.aggregate(events)?;
+        for group in groups {
+            if is_shutdown(shutdown) {
+                return Ok(false);
             }
+            let payload = Slack::new(group.message.text, group.message.frequency);
+            if !self.deliver(&payload, shutdown).await? {
+                return Ok(false);
+            }
+            let now = Instant::now();
+            self.sent.extend(group.ids.into_iter().map(|id| (id, now)));
         }
+        Ok(true)
     }
 
-    pub async fn send(&self, event: Vec<Event>) {
-        match self.sender.send(event) {
-            Ok(_) => {}
-            Err(err) => {
-                error!("error sending event to channel: {}", err);
+    fn aggregate(&self, events: Vec<Event>) -> Result<Vec<Group>, String> {
+        let mut seen = HashSet::new();
+        let mut positions = HashMap::new();
+        let mut groups: Vec<Group> = Vec::new();
+        for event in events {
+            let id = (event.index.clone(), event.id.clone());
+            if self.sent.contains_key(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            let key = (
+                self.regexp.replace_all(&event.message, "").into_owned(),
+                event.meta.namespace.clone(),
+            );
+            if let Some(&position) = positions.get(&key) {
+                let group: &mut Group = &mut groups[position];
+                group.ids.push(id);
+                group.message.frequency += 1;
+            } else {
+                let text = self
+                    .templates
+                    .render("slack", &new_slack_params_map(event))
+                    .map_err(|e| format!("failed to render Slack message: {e}"))?;
+                positions.insert(key, groups.len());
+                groups.push(Group {
+                    ids: vec![id],
+                    message: Message::new(text, 1),
+                });
             }
         }
+        Ok(groups)
+    }
+
+    async fn deliver(
+        &mut self,
+        payload: &Slack,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool, String> {
+        for attempt in 0..MAX_ATTEMPTS {
+            if is_shutdown(shutdown) {
+                return Ok(false);
+            }
+            // Keep server cooldowns across calls, including after the final
+            // failed attempt when the watcher retries the whole window.
+            if let Some(deadline) = self.retry_not_before {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_shutdown(shutdown) => return Ok(false),
+                    _ = tokio::time::sleep_until(deadline) => {}
+                }
+                self.retry_not_before = None;
+            }
+            let mut delay = self.retry_delay * (1 << attempt);
+            let error = match self
+                .client
+                .post(&self.webhook_url)
+                .json(payload)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    if status == StatusCode::OK {
+                        match response.text().await {
+                            Ok(body) if body.trim() == "ok" => return Ok(true),
+                            Ok(_) => {
+                                return Err("Slack returned an unexpected acknowledgement".into())
+                            }
+                            Err(e) => {
+                                format!("failed to read Slack acknowledgement: {}", e.without_url())
+                            }
+                        }
+                    } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                        if let Some(seconds) = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                        {
+                            delay = Duration::from_secs(seconds);
+                        }
+                        format!("Slack returned {status}")
+                    } else {
+                        return Err(format!("Slack rejected the notification: {status}"));
+                    }
+                }
+                Err(e) => format!("Slack request failed: {}", e.without_url()),
+            };
+            let deadline = tokio::time::Instant::now()
+                .checked_add(delay)
+                .ok_or_else(|| "invalid Slack Retry-After interval".to_string())?;
+            self.retry_not_before = Some(deadline);
+            if attempt + 1 == MAX_ATTEMPTS {
+                return Err(format!("{error}; delivery attempts exhausted"));
+            }
+            log::warn!("{error}; retrying in {} seconds", delay.as_secs_f64());
+        }
+        unreachable!("MAX_ATTEMPTS is nonzero")
     }
 }
 

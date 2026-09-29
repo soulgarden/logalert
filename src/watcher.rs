@@ -1,175 +1,214 @@
-use std::collections::HashMap;
-use std::ops::Sub;
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::time::Duration;
 
-use chrono::TimeDelta;
-use handlebars::Handlebars;
-use log::error;
+use chrono::{DateTime, TimeDelta, Utc};
 use reqwest::Client;
-use tokio::sync::Notify;
-use tokio::time;
+use serde_json::{json, Value};
+use tokio::sync::watch;
+use tokio::time::{self, MissedTickBehavior};
 
 use crate::entities::event::{Event, Meta};
 use crate::entities::response::Root;
 use crate::sender::Sender;
+use crate::signals::{is_shutdown, wait_for_shutdown};
 use crate::Conf;
 
-const CONTENT_TYPE: &str = "Content-Type";
-const JSON_TYPE: &str = "application/json";
+const PAGE_SIZE: usize = 50;
+const MAX_RESULTS: usize = 10_000;
+const OVERLAP: TimeDelta = TimeDelta::seconds(10);
+
+#[cfg(test)]
+mod regression_tests;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchWindow {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
 
 pub struct Watcher {
     conf: Conf,
-    sender: Arc<Sender>,
     client: Client,
+    start_time: DateTime<Utc>,
+    pending_window: Option<SearchWindow>,
 }
 
 impl Watcher {
-    pub fn new(conf: Conf, sender: Arc<Sender>) -> Result<Self, String> {
+    pub fn new(conf: Conf) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-
-        Ok(Watcher {
+            .map_err(|e| format!("failed to create search client: {e}"))?;
+        Ok(Self {
             conf,
-            sender,
             client,
+            start_time: Utc::now() - OVERLAP,
+            pending_window: None,
         })
     }
 
-    pub async fn run(&mut self, notify: Arc<Notify>) {
-        let mut handlebars = Handlebars::new();
-
-        if let Err(e) =
-            handlebars.register_template_string("query", include_str!("templates/query.hbs"))
-        {
-            error!("failed to register query template: {}", e);
-            return;
-        }
-
-        let mut start_time = chrono::Utc::now();
-
+    pub async fn run(&mut self, sender: &mut Sender, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = time::interval(Duration::from_secs(self.conf.watch_interval));
-
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
-                    let map = HashMap::from([
-                        ("query".to_string(), self.conf.query_string.clone()),
-                        (
-                            "date".to_string(),
-                            start_time.clone().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        ),
-                    ]);
-
-                    let query = match handlebars.render("query", &map) {
-                        Ok(q) => q,
-                        Err(e) => {
-                            error!("failed to render query template: {}", e);
-                            continue;
-                        }
-                    };
-
-                    let url = format!(
-                        "{}:{}{}{}/_search",
-                        self.conf.storage.host,
-                        self.conf.storage.port,
-                        self.conf.storage.api_prefix,
-                        self.conf.storage.index_name
-                    );
-
-                    let mut req = self
-                        .client
-                        .post(url)
-                        .body(query)
-                        .header(CONTENT_TYPE, JSON_TYPE);
-
-                    if self.conf.storage.use_auth {
-                        req = req.basic_auth(
-                            &self.conf.storage.username,
-                            Some(&self.conf.storage.password),
-                        );
-                    }
-
-                    match req.send().await {
-                        Ok(resp) => {
-                            let resp_text = match resp.text().await {
-                                Ok(text) => text,
-                                Err(e) => {
-                                    error!("failed to read response body: {}", e);
-                                    continue;
-                                }
-                            };
-
-                            match serde_json::from_str::<Root>(&resp_text) {
-                                Ok(resp) => {
-                                    if resp.hits.hits.is_none() || resp.hits.total.value == 0 {
-                                        match TimeDelta::try_seconds(10) {
-                                            Some(delta) => {
-                                                start_time = chrono::Utc::now().sub(delta);
-                                            }
-                                            None => {
-                                                error!("failed to create 10 second time delta");
-                                                start_time = chrono::Utc::now();
-                                            }
-                                        }
-                                        continue;
-                                    }
-
-                                    let hits = match resp.hits.hits {
-                                        Some(hits) => hits,
-                                        None => {
-                                            error!("hits is None despite value > 0");
-                                            continue;
-                                        }
-                                    };
-
-                                    let mut events: Vec<Event> = Vec::new();
-
-                                    for hit in hits {
-                                        let mut timestamp = String::new();
-
-                                        if let Some(ts) = hit.source.timestamp { // Elasticsearch
-                                            timestamp = ts;
-                                        } else if let Some(ts) = hit.timestamp { // ZincSearch
-                                            timestamp = ts;
-                                        }
-
-                                        events.push(Event::new(
-                                            hit.id,
-                                            hit.source.message,
-                                            timestamp,
-                                            Meta::new(
-                                                hit.source.pod_name,
-                                                hit.source.namespace,
-                                                hit.source.container_name,
-                                                hit.source.pod_id,
-                                            ),
-                                        ))
-                                    }
-
-                                    self.sender.send(events).await;
-                                }
-                                Err(err) => {
-                                    error!("json decode error: {}", err);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            error!("query failed with error: {}", err);
-                        }
-                    }
-                }
-                _ = notify.notified() => {
-                    log::info!("watcher received shutdown signal");
-
-                    break
-                }
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => break,
+                _ = ticker.tick() => {}
+            }
+            match self.poll(sender, &mut shutdown).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => log::error!("search window incomplete: {error}"),
             }
         }
     }
+
+    async fn poll(
+        &mut self,
+        sender: &mut Sender,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool, String> {
+        let window = *self.pending_window.get_or_insert_with(|| SearchWindow {
+            start: self.start_time,
+            end: Utc::now(),
+        });
+        if !self.process_window(window, sender, shutdown).await? {
+            return Ok(false);
+        }
+        self.start_time = window.end - OVERLAP;
+        self.pending_window = None;
+        Ok(true)
+    }
+
+    async fn process_window(
+        &self,
+        window: SearchWindow,
+        sender: &mut Sender,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool, String> {
+        let mut offset = 0;
+        let mut expected_total = None;
+        let mut seen = HashSet::new();
+        loop {
+            if is_shutdown(shutdown) {
+                return Ok(false);
+            }
+            let response = self.fetch_page(window, offset).await?;
+            // The request may have completed after a shutdown signal.
+            if is_shutdown(shutdown) {
+                return Ok(false);
+            }
+            if response.timed_out || response.shards.as_ref().is_some_and(|s| s.failed > 0) {
+                return Err("search returned a partial response".into());
+            }
+            if response
+                .error
+                .as_ref()
+                .is_some_and(|error| !error.is_null() && error.as_str() != Some(""))
+            {
+                return Err("search returned an error in the response body".into());
+            }
+            let total = usize::try_from(response.hits.total.value)
+                .map_err(|_| "search returned a negative hit count".to_string())?;
+            if total > MAX_RESULTS
+                || response
+                    .hits
+                    .total
+                    .relation
+                    .as_deref()
+                    .is_some_and(|r| r != "eq")
+            {
+                return Err(format!("search exceeds the exact {MAX_RESULTS}-hit window limit; narrow the query or polling interval"));
+            }
+            if expected_total.is_some_and(|expected| expected != total) {
+                return Err("search results changed during pagination; retrying the window".into());
+            }
+            expected_total = Some(total);
+            let hits = response.hits.hits.unwrap_or_default();
+            if hits.len() > PAGE_SIZE
+                || offset + hits.len() > total
+                || (hits.is_empty() && offset < total)
+            {
+                return Err("search returned an incomplete or inconsistent page".into());
+            }
+            let count = hits.len();
+            let mut events = Vec::with_capacity(count);
+            for hit in hits {
+                if !seen.insert((hit.index.clone(), hit.id.clone())) {
+                    return Err("search repeated a document during pagination".into());
+                }
+                let timestamp = hit.source.timestamp.or(hit.timestamp).unwrap_or_default();
+                let mut event = Event::new(
+                    hit.id,
+                    hit.source.message,
+                    timestamp,
+                    Meta::new(
+                        hit.source.pod_name,
+                        hit.source.namespace,
+                        hit.source.container_name,
+                        hit.source.pod_id,
+                    ),
+                );
+                event.index = hit.index;
+                events.push(event);
+            }
+            if !sender.send(events, shutdown).await? {
+                return Ok(false);
+            }
+            offset += count;
+            if offset == total {
+                return Ok(true);
+            }
+        }
+    }
+
+    async fn fetch_page(&self, window: SearchWindow, offset: usize) -> Result<Root, String> {
+        let url = format!(
+            "{}:{}{}{}/_search",
+            self.conf.storage.host,
+            self.conf.storage.port,
+            self.conf.storage.api_prefix,
+            self.conf.storage.index_name
+        );
+        // Keep replica selection stable for equal timestamps. Pagination
+        // guards still reject inconsistent results after cluster changes.
+        let mut url =
+            reqwest::Url::parse(&url).map_err(|error| format!("invalid search URL: {error}"))?;
+        url.query_pairs_mut().append_pair("preference", "logalert");
+        let mut request =
+            self.client
+                .post(url)
+                .json(&build_query(&self.conf.query_string, window, offset));
+        if self.conf.storage.use_auth {
+            request = request.basic_auth(
+                &self.conf.storage.username,
+                Some(&self.conf.storage.password),
+            );
+        }
+        request
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+            .map_err(|e| format!("search request failed: {}", e.without_url()))?
+            .json::<Root>()
+            .await
+            .map_err(|e| format!("invalid search response: {}", e.without_url()))
+    }
+}
+
+fn build_query(query: &str, window: SearchWindow, offset: usize) -> Value {
+    json!({
+        "query": {"bool": {"filter": [
+            {"range": {"@timestamp": {"gte": window.start.to_rfc3339(), "lt": window.end.to_rfc3339()}}},
+            {"query_string": {"query": query}}
+        ]}},
+        "from": offset,
+        "size": PAGE_SIZE,
+        "track_total_hits": true,
+        "sort": [{"@timestamp": {"order": "asc"}}]
+    })
 }
 
 #[cfg(test)]
@@ -177,63 +216,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_template_rendering() {
-        let mut handlebars = Handlebars::new();
-        handlebars
-            .register_template_string("query", include_str!("templates/query.hbs"))
-            .unwrap();
-
-        let map = HashMap::from([
-            ("query".to_string(), "level:error".to_string()),
-            ("date".to_string(), "2024-01-15T10:30:00Z".to_string()),
-        ]);
-
-        let result = handlebars.render("query", &map).unwrap();
-
-        assert!(result.contains("\"gte\": \"2024-01-15T10:30:00Z\""));
-        assert!(result.contains("\"query\": \"level:error\""));
-        assert!(result.contains("\"size\": 50"));
-    }
-
-    #[test]
-    fn test_query_template_with_complex_query() {
-        let mut handlebars = Handlebars::new();
-        handlebars
-            .register_template_string("query", include_str!("templates/query.hbs"))
-            .unwrap();
-
-        let map = HashMap::from([
-            (
-                "query".to_string(),
-                "level:error AND namespace:production".to_string(),
-            ),
-            ("date".to_string(), "2024-01-15T00:00:00Z".to_string()),
-        ]);
-
-        let result = handlebars.render("query", &map).unwrap();
-
-        assert!(result.contains("level:error AND namespace:production"));
-    }
-
-    #[test]
-    fn test_query_template_json_validity() {
-        let mut handlebars = Handlebars::new();
-        handlebars
-            .register_template_string("query", include_str!("templates/query.hbs"))
-            .unwrap();
-
-        let map = HashMap::from([
-            ("query".to_string(), "level:error".to_string()),
-            ("date".to_string(), "2024-01-15T10:30:00Z".to_string()),
-        ]);
-
-        let result = handlebars.render("query", &map).unwrap();
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&result);
-
-        assert!(parsed.is_ok());
-        let json = parsed.unwrap();
-        assert!(json["query"]["bool"]["filter"].is_array());
-        assert_eq!(json["size"], 50);
+    fn test_query_construction() {
+        let window = SearchWindow {
+            start: "2024-01-15T10:30:00Z".parse().unwrap(),
+            end: "2024-01-15T10:31:00Z".parse().unwrap(),
+        };
+        let query = build_query("level:error AND namespace:production", window, 50);
+        assert_eq!(query["from"], 50);
+        assert_eq!(query["size"], PAGE_SIZE);
+        assert_eq!(
+            query["query"]["bool"]["filter"][1]["query_string"]["query"],
+            "level:error AND namespace:production"
+        );
+        assert_eq!(
+            query["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"],
+            window.start.to_rfc3339()
+        );
+        assert_eq!(
+            query["query"]["bool"]["filter"][0]["range"]["@timestamp"]["lt"],
+            window.end.to_rfc3339()
+        );
     }
 
     #[test]
@@ -300,7 +302,7 @@ mod tests {
         assert!(delta.is_some());
 
         let now = chrono::Utc::now();
-        let past = now.sub(delta.unwrap());
+        let past = now - delta.unwrap();
 
         assert!(past < now);
     }

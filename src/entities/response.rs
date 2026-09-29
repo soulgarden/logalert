@@ -13,7 +13,8 @@ pub struct Source {
 
 #[derive(Deserialize)]
 pub struct Struct {
-    pub _type: String,
+    #[serde(default, rename = "_index")]
+    pub index: String,
     #[serde(rename(deserialize = "_id"))]
     pub id: String,
     #[serde(rename(deserialize = "@timestamp"))]
@@ -25,6 +26,7 @@ pub struct Struct {
 #[derive(Deserialize)]
 pub struct Total {
     pub value: i64,
+    pub relation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +38,16 @@ pub struct Hits {
 #[derive(Deserialize)]
 pub struct Root {
     pub hits: Hits,
+    pub error: Option<serde_json::Value>,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(rename = "_shards")]
+    pub shards: Option<Shards>,
+}
+
+#[derive(Deserialize)]
+pub struct Shards {
+    pub failed: u64,
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ A lightweight, memory-efficient Rust application that monitors Elasticsearch/Zin
 - **Low Resource Usage**: Optimized for minimal CPU and memory consumption
 - **Real-time Monitoring**: Continuous polling with configurable intervals
 - **Event Deduplication**: Intelligent message aggregation to prevent spam
-- **Template-based Queries**: Flexible Handlebars templates for search queries
+- **JSON Queries**: Search strings are serialized without changing their contents
 - **Robust Error Handling**: Comprehensive validation and graceful failure recovery
 - **Cloud Native**: Ready for Kubernetes deployment with Helm charts
 
@@ -17,72 +17,21 @@ A lightweight, memory-efficient Rust application that monitors Elasticsearch/Zin
 
 ## Architecture
 
-Logalert uses an **actor-based architecture** with two main components that run concurrently:
-
-### Core Components
-
-#### 1. **Watcher** (`src/watcher.rs`)
-- **Purpose**: Polls Elasticsearch/ZincSearch for new events matching specified criteria
-- **Polling Strategy**: Time-based querying using configurable intervals (1-3600 seconds)
-- **Query Engine**: Uses Handlebars templates for flexible query construction
-- **Data Pipeline**: Processes search results and forwards events to the Sender
-
-**Query Template** (`src/templates/query.hbs`):
-```json
-{
-  "query": {
-    "bool": {
-      "filter": [
-        {
-          "range": {
-            "@timestamp": { "gte": "{{ date }}" }
-          }
-        },
-        {
-          "query_string": {
-            "query": "{{ query }}"
-          }
-        }
-      ]
-    }
-  },
-  "size": 50,
-  "sort": [{ "@timestamp": { "order": "desc" } }]
-}
-```
-
-#### 2. **Sender** (`src/sender.rs`)
-- **Purpose**: Processes events and delivers Slack notifications
-- **Deduplication**: In-memory HashMap tracks sent messages to prevent duplicates
-- **Rate Limiting**: Aggregates events by message+namespace to reduce notification spam
-- **Cleanup**: Automatic memory cleanup of old event tracking data
-- **Template Engine**: Handlebars templates for Slack message formatting
-
-### Data Flow
+Logalert runs one asynchronous processing loop:
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Elasticsearch │◄───│     Watcher     │    │     Sender      │
-│   /ZincSearch   │    │                 │    │                 │
-└─────────────────┘    │ • Polls every N │    │ • Deduplicates  │
-                       │   seconds       │───►│ • Aggregates    │
-┌─────────────────┐    │ • Queries with  │    │ • Sends to Slack│
-│   Config File   │───►│   templates     │    │                 │
-└─────────────────┘    │ • Parses events │    └─────────────────┘
-                       └─────────────────┘             │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │      Slack      │
-                                              └─────────────────┘
+Read a search page → aggregate events → deliver to Slack → read the next page
 ```
 
-### Working Principles
+- `Watcher` queries fixed time windows in ascending timestamp order, 50 records at a time. It advances the window only after every page has been delivered. Windows overlap by 10 seconds to include recently indexed events.
+- `Sender` groups messages by normalized text and namespace. It records document IDs only after Slack returns a successful acknowledgement. IDs include the index name and remain in memory for one hour.
+- Network failures, HTTP 429, and server errors are retried up to three times per delivery call. `Retry-After` is honored, including across retries of the search window. Other HTTP errors return immediately.
+- A failed window is retried on the next polling tick. Successful groups are deduplicated during replay. Reading waits for delivery, so there is no internal queue to overflow.
+- SIGINT and SIGTERM stop new work and allow the current request to finish. Shutdown has a 15-second deadline; expiry returns a nonzero exit status.
 
-1. **Event-Driven Processing**: Uses Tokio's async runtime for concurrent operation
-2. **Memory Management**: In-memory deduplication cache with automatic cleanup
-3. **Graceful Shutdown**: Signal handling for clean application termination
-4. **Configuration Validation**: Comprehensive input validation prevents runtime errors
-5. **HTTP Resilience**: Configurable timeouts and connection limits for reliability
+Pagination uses `from`/`size` for Elasticsearch and ZincSearch compatibility. A fixed `preference` keeps Elasticsearch replica selection consistent while cluster state is unchanged. A window is limited to 10,000 hits. Partial responses, changing totals, repeated document IDs, and inconsistent pages fail the window instead of advancing it. The same window is retried until it succeeds; exceeding the limit requires operator intervention to narrow the query. This is not snapshot pagination: concurrent indexing or deletion can still affect the results. Events arriving more than 10 seconds late may fall outside the overlap.
+
+Delivery state is in memory. Restarting does not resume an unfinished window, and an ambiguous network failure can produce a duplicate Slack notification. Durable delivery across restarts is outside this service's current contract.
 
 ## Configuration
 

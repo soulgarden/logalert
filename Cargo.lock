@@ -761,7 +761,6 @@ dependencies = [
  "chrono",
  "handlebars",
  "json_env_logger2",
- "libc",
  "log",
  "regex",
  "reqwest",
