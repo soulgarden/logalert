@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.98.1-alpine3.24 AS builder
+FROM rust:1.99.0-alpine3.24 AS builder
 
 RUN apk add --no-cache cmake make musl-dev
 
@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked && \
     install -Dm755 target/release/logalert /out/logalert
 
-FROM alpine:3.24.2
+FROM alpine:3.24.3
 
 RUN apk add --no-cache ca-certificates && \
     adduser -S -u 10001 -G www-data www-data
